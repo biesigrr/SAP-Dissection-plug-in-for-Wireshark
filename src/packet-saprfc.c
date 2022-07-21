@@ -455,9 +455,89 @@ guint32 global_saprfc_table_content_counter = 0;
 
 void proto_reg_handoff_saprfc(void);
 
+typedef struct rfc_table_field {
+	guint8 type;
+	guint8 length;
+	guint32 offset;
+} rfc_table_field_t;
+
+typedef struct rfc_table_structure {
+	guint8 field_count;
+	rfc_table_field_t *fields;
+	guint32 width;
+} rfc_table_structure_t;
+
+static rfc_table_structure_t*
+rfc_table_structure_alloc(wmem_allocator_t *allocator, guint8 field_count){
+	rfc_table_structure_t *structure = (rfc_table_structure_t*) wmem_alloc(allocator, sizeof(rfc_table_structure_t));
+	structure->field_count = field_count;
+	structure->fields = (rfc_table_field_t*) wmem_alloc0(allocator, field_count * sizeof(rfc_table_field_t));
+	structure->width = 0;
+
+	return structure;
+}
 
 static void
-dissect_saprfc_tables_compressed(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, tvbuff_t *structure_tvb, guint32 structure_offset, guint32 structure_length, guint32 row_width, guint32 row_count){
+rfc_table_structure_destroy(wmem_allocator_t *allocator, rfc_table_structure_t *structure){
+	wmem_free(allocator, structure->fields);
+	wmem_free(allocator, structure);
+}
+
+static rfc_table_structure_t*
+dissect_saprfc_table_structure(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, guint32 offset, guint32 value_length){
+	proto_item *structure, *field = NULL;
+	proto_tree *structure_tree, *field_tree = NULL;
+
+	guint8 field_index = 0, field_count = 0;
+	guint32 field_offset = 0;
+	rfc_table_structure_t *table_structure = NULL;
+	rfc_table_field_t *field_structure = NULL;
+	
+	structure = proto_tree_add_item(tree, hf_saprfc_table_structure, tvb, offset, value_length, ENC_NA);
+	structure_tree = proto_item_add_subtree(structure, ett_saprfc);
+
+	/* Parse row structure */
+	field_count = tvb_get_guint8(tvb, offset); offset+=1;
+	if (0x80 == (field_count & 0x80)){
+		field_count = 250;
+		offset += 1;
+	}
+
+	if (value_length - 1 < (guint32)2 * field_count){
+		expert_add_info_format(pinfo, structure, &ei_saprfc_invalid_table_structure_length, "The minimum table structure length (%d) exceeds the remaining payload length (%d).", 2 * field_count, value_length - 1);
+		return NULL;
+	}
+
+	table_structure = rfc_table_structure_alloc(pinfo->pool, field_count);
+	for (field_index = 0; field_index < field_count; field_index++){
+
+		field = proto_tree_add_item(structure_tree, hf_saprfc_table_structure_field, tvb, offset, 2, ENC_NA);
+		field_tree = proto_item_add_subtree(field, ett_saprfc);
+
+		field_structure = &table_structure->fields[field_index];
+
+		field_structure->type = tvb_get_guint8(tvb, offset);
+		proto_tree_add_item(field_tree, hf_saprfc_table_structure_field_type, tvb, offset, 1, ENC_NA);
+		offset+=1;
+
+		field_structure->length = tvb_get_guint8(tvb, offset);
+		add_item_value_uint8(tvb, field, field_tree, hf_saprfc_table_structure_field_length, offset, "Length");
+		offset+=1;
+
+		field_structure->offset = field_offset;
+		field_offset += field_structure->length;
+		if (field_structure->length==0xFF){
+			/* Can probably be even longer */
+			offset+=1;
+		}
+	}
+
+	table_structure->width = field_offset;
+	return table_structure;
+}
+
+static void
+dissect_saprfc_tables_compressed(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, tvbuff_t *structure_tvb, guint32 structure_offset, guint32 structure_length, guint32 row_width, guint32 row_count, gboolean dissect_structure){
 
 	guint8 *decompressed_buffer;
 	guint32 reported_length = 0, uncompress_length = 0, offset = 0, initial_offset = 0, row_offset = 0;
@@ -466,13 +546,12 @@ dissect_saprfc_tables_compressed(tvbuff_t *tvb, packet_info *pinfo, proto_tree *
 	proto_tree *compression_header_tree = NULL;
 
 	tvbuff_t *next_tvb = NULL;
-	proto_item *content = NULL, *structure = NULL, *field = NULL, *row = NULL, *cell = NULL;
-	proto_tree *content_tree = NULL, *structure_tree = NULL, *field_tree = NULL, *row_tree = NULL;
+	proto_item *content = NULL, *row = NULL, *cell = NULL;
+	proto_tree *content_tree = NULL, *row_tree = NULL;
 
-	guint8 field_index = 0, field_count = 0;
-	guint8 *field_types = NULL, *field_lengths = NULL;
-	guint32 field_offset = 0;
-	guint32 *field_offsets = NULL;
+	rfc_table_structure_t *table_structure = NULL;
+	guint8 field_index = 0;
+	rfc_table_field_t *table_field = NULL;
 
 	/* Skip the first 8 bytes */
 	initial_offset = offset = 8;
@@ -539,70 +618,47 @@ dissect_saprfc_tables_compressed(tvbuff_t *tvb, packet_info *pinfo, proto_tree *
 				return;
 			}
 
-			structure = proto_tree_add_item(tree, hf_saprfc_table_structure, structure_tvb, structure_offset, structure_length, ENC_NA);
-			structure_tree = proto_item_add_subtree(structure, ett_saprfc);
-
-			/* Parse row structure */
-			field_count = tvb_get_guint8(structure_tvb, structure_offset); structure_offset+=1;
-			if (structure_length - 1 < (guint32)2 * field_count){
-				expert_add_info_format(pinfo, structure, &ei_saprfc_invalid_table_structure_length, "The minimum table structure length (%d) exceeds the remaining payload length (%d). Skipping dissection of table content", 2 * field_count, structure_length - 1);
-				return;
-			}
-
-			field_types = (guint8 *)wmem_alloc(pinfo->pool, field_count);
-			field_lengths = (guint8 *)wmem_alloc(pinfo->pool, field_count);
-			field_offsets = (guint32 *)wmem_alloc(pinfo->pool, field_count * sizeof(guint32));
-
-			for (field_index = 0; field_index < field_count; field_index++){
-
-				field = proto_tree_add_item(structure_tree, hf_saprfc_table_structure_field, structure_tvb, structure_offset, 2, ENC_NA);
-				field_tree = proto_item_add_subtree(field, ett_saprfc);
-
-				field_types[field_index] = tvb_get_guint8(structure_tvb, structure_offset);
-				proto_tree_add_item(field_tree, hf_saprfc_table_structure_field_type, structure_tvb, structure_offset, 1, ENC_NA);
-				structure_offset+=1;
-
-				field_lengths[field_index] = tvb_get_guint8(structure_tvb, structure_offset);
-				add_item_value_uint8(structure_tvb, field, field_tree, hf_saprfc_table_structure_field_length, structure_offset, "Length");
-				structure_offset+=1;
-
-				field_offsets[field_index] = field_offset;
-				field_offset += field_lengths[field_index];
-				if (field_lengths[field_index]==0xFF){
-					/* Can probably be even longer */
-					structure_offset+=1;
+			if (dissect_structure){
+				table_structure = dissect_saprfc_table_structure(structure_tvb, pinfo, tree, structure_offset, structure_length);
+				if (!table_structure){
+					return;
 				}
-			}
 
-			if (field_offset != row_width){
-				expert_add_info_format(pinfo, structure, &ei_saprfc_mismatching_table_row_width, "The table row width (%d) reported in table metadata does not match row width (%d) from table structure. Skipping dissection of table content", row_width, field_offset);
-				return;
-			}
+				/* Add the payload subtree using the new tvb*/
+				content = proto_tree_add_item(tree, hf_saprfc_table_content, next_tvb, 0, -1, ENC_NA);
+				content_tree = proto_item_add_subtree(content, ett_saprfc);
 
-			/* Add the payload subtree using the new tvb*/
-			content = proto_tree_add_item(tree, hf_saprfc_table_content, next_tvb, 0, -1, ENC_NA);
-			content_tree = proto_item_add_subtree(content, ett_saprfc);
+				/* Row width is aligned, so equality check might fail */
+				if (table_structure->width > row_width){
+					expert_add_info_format(pinfo, content, &ei_saprfc_mismatching_table_row_width, "The table row width (%d) reported in table metadata is smaller than the width of fields (%d) from table structure. Skipping dissection of table content", row_width, table_structure->width);
+					wmem_free(pinfo->pool, table_structure);
+					return;
+				}
 
-			for (row_offset = 0; row_offset < uncompress_length; row_offset += row_width){
-				row = proto_tree_add_item(content_tree, hf_saprfc_table_row, next_tvb, row_offset, row_width, ENC_NA);
-				row_tree = proto_item_add_subtree(row, ett_saprfc);
-				for (field_index = 0; field_index < field_count; field_index++){
-					cell = proto_tree_add_item(row_tree, hf_saprfc_table_row_field, next_tvb, row_offset + field_offsets[field_index], field_lengths[field_index], ENC_NA);
-					const gchar *field_type_name = try_val_to_str(field_types[field_index], abap_types_typename_values);
-					if (field_type_name){
-						proto_item_append_text(cell, " (%s)", field_type_name);
-					}
+				for (row_offset = 0; row_offset < uncompress_length; row_offset += row_width){
+					row = proto_tree_add_item(content_tree, hf_saprfc_table_row, next_tvb, row_offset, row_width, ENC_NA);
+					row_tree = proto_item_add_subtree(row, ett_saprfc);
+					for (field_index = 0; field_index < table_structure->field_count; field_index++){
+						table_field = &table_structure->fields[field_index];
+						cell = proto_tree_add_item(row_tree, hf_saprfc_table_row_field, next_tvb, row_offset + table_field->offset, table_field->length, ENC_NA);
+						const gchar *field_type_name = try_val_to_str(table_field->type, abap_types_typename_values);
+						if (field_type_name){
+							proto_item_append_text(cell, " (%s)", field_type_name);
+						}
 
-					switch (field_types[field_index]){
-						case TYPC:
-						case TYPNUM:{
-							guint8 *string = tvb_get_string_enc(pinfo->pool, next_tvb, row_offset + field_offsets[field_index], field_lengths[field_index], ENC_ASCII);
-							proto_item_append_text(row, ", [%d]=%s", field_index, string);
-							proto_item_append_text(cell, " Value=%s", string);
-							break;
+						switch (table_field->type){
+							case TYPC:
+							case TYPNUM:{
+								guint8 *string = tvb_get_string_enc(pinfo->pool, next_tvb, row_offset + table_field->offset, table_field->length, ENC_ASCII);
+								proto_item_append_text(row, ", [%d]=%s", field_index, string);
+								proto_item_append_text(cell, " Value=%s", string);
+								break;
+							}
 						}
 					}
 				}
+
+				wmem_free(pinfo->pool, table_structure);
 			}
 		}
 
@@ -615,7 +671,7 @@ dissect_saprfc_tables_compressed(tvbuff_t *tvb, packet_info *pinfo, proto_tree *
 }
 
 static void
-dissect_saprfc_tables(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, guint32 offset, guint16 item_length){
+dissect_saprfc_tables(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, guint32 offset, guint16 item_length, gboolean dissect_structure){
 
 	guint8 *reassemble_buffer = NULL, *table_name = NULL;
 	guint16 next_item = 0;
@@ -628,8 +684,10 @@ dissect_saprfc_tables(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, guint
 	guint32 structure_offset = offset;
 	guint32 structure_length = item_length;
 
-	/* Skip table line structure */
-	offset += item_length + 2;
+	if (dissect_structure){
+		/* Skip table line structure */
+		offset += structure_length + 2;
+	}
 
 	next_item = tvb_get_ntohs(tvb, offset); offset+=2;
 	if (next_item != 0x0301){
@@ -702,7 +760,7 @@ dissect_saprfc_tables(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, guint
 	proto_item_append_text(table, ", Name=%s", table_name);
 
 	/* Now uncompress the table content */
-	dissect_saprfc_tables_compressed(compressed_tvb, pinfo, table_tree, tvb, structure_offset, structure_length, row_width, row_count);
+	dissect_saprfc_tables_compressed(compressed_tvb, pinfo, table_tree, tvb, structure_offset, structure_length, row_width, row_count, dissect_structure);
 
 }
 
@@ -720,6 +778,8 @@ dissect_saprfc_item(tvbuff_t *tvb, packet_info *pinfo, proto_item *item, proto_t
 
 	} else if (item_id1==0x02 && item_id2==0x13){
 		proto_tree_add_none_format(item_value_tree, hf_saprfc_item_value, tvb, offset, item_length, "Type Structure A");
+		void* discard = dissect_saprfc_table_structure(tvb, pinfo, item_value_tree, offset, item_length);
+		wmem_free(pinfo->pool, discard);
 
 	} else if (item_id1==0x03 && item_id2==0x01){
 		add_item_value_string(tvb, pinfo, item, item_value_tree, hf_saprfc_item_value, offset, item_length, "Table Name", 1); offset+=item_length;
@@ -772,7 +832,7 @@ dissect_saprfc_item(tvbuff_t *tvb, packet_info *pinfo, proto_item *item, proto_t
 static void
 dissect_saprfc_payload(tvbuff_t *tvb, packet_info *info, proto_tree *tree, proto_tree *parent_tree, guint32 offset){
 
-	guint8 item_id1, item_id2;
+	guint8 item_id1, item_id2, previous_id1, previous_id2;
 	guint16 item_length, item_value_length;
 
 	proto_item *item = NULL, *item_value = NULL;
@@ -817,7 +877,11 @@ dissect_saprfc_payload(tvbuff_t *tvb, packet_info *info, proto_tree *tree, proto
 
 		/* Also send the tables items for reassembling */
 		if (global_saprfc_table_reassembly && item_id1==0x02 && item_id2==0x13){
-			dissect_saprfc_tables(tvb, info, parent_tree, offset, item_value_length);
+			dissect_saprfc_tables(tvb, info, parent_tree, offset, item_value_length, TRUE);
+		}
+
+		if (global_saprfc_table_reassembly && item_id1==0x03 && item_id2==0x01 && (previous_id1!=0x02 || previous_id2!=0x13)){
+			dissect_saprfc_tables(tvb, info, parent_tree, offset - 4, 0, FALSE);
 		}
 
 		offset+= item_value_length;
@@ -829,6 +893,9 @@ dissect_saprfc_payload(tvbuff_t *tvb, packet_info *info, proto_tree *tree, proto
 		if (item_id1==0xFF && item_id2==0xFF){
 			break;
 		}
+
+		previous_id1 = item_id1;
+		previous_id2 = item_id2;
 	}
 
 }
