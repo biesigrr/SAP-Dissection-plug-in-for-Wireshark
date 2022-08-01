@@ -208,6 +208,14 @@ static const value_string saprfc_header_ncpic_parameters_client_info_values[] = 
 	{ 0x00, NULL }
 };
 
+static const value_string saprfc_header_endianess[] = {
+	{ 0, "Unknown" },
+	{ 1, "Little Endian" },
+	{ 2, "Big Endian" },
+	/* NULL */
+	{ 0, NULL }
+};
+
 /* ABAP/4 data types, taken from saprfc.h from RFC sdk */
 #define TYPC			0
 #define TYPDATE			1
@@ -764,19 +772,106 @@ dissect_saprfc_tables(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, guint
 
 }
 
+void
+add_item_value_codepage(tvbuff_t *tvb, proto_item *item, proto_tree *tree, int hf, guint32 offset, guint32 length, const char *text, int show_in_tree){
+	guint32 cp = tvb_get_guint32(tvb, offset, ENC_BIG_ENDIAN);
+
+	guint8 cp_string[5] = {0, 0, 0, 0, 0};
+	for (gint32 i = 0; i < 4; i++){
+		cp_string[i] = (guint8)'0' + (guint8)(cp >> (24 - 8 * i));
+	}
+
+	proto_tree_add_none_format(tree, hf, tvb, offset, length, "%s: %s", text, cp_string);
+	if (show_in_tree) proto_item_append_text(item, ", %s=%s", text, cp_string);
+}
+
 static void
 dissect_saprfc_item(tvbuff_t *tvb, packet_info *pinfo, proto_item *item, proto_tree *item_value_tree, guint32 offset, guint8 item_id1, guint8 item_id2, guint16 item_length){
 
-	if (item_id1==0x01 && item_id2==0x02){
+	if (item_id1==0x00 && item_id2==0x0B){
+		add_item_value_string(tvb, pinfo, item, item_value_tree, hf_saprfc_item_value, offset, item_length, "SAP Release", 1); offset+=item_length;
+
+	} else if (item_id1==0x00 && item_id2==0x06){
+		add_item_value_string(tvb, pinfo, item, item_value_tree, hf_saprfc_item_value, offset, item_length, "Destination", 1); offset+=item_length;
+
+	} else if (item_id1==0x00 && item_id2==0x07){
+		add_item_value_string(tvb, pinfo, item, item_value_tree, hf_saprfc_item_value, offset, item_length, "Ip Address", 1); offset+=item_length;
+
+	} else if (item_id1==0x00 && item_id2==0x08){
+		add_item_value_string(tvb, pinfo, item, item_value_tree, hf_saprfc_item_value, offset, item_length, "Destination", 1); offset+=item_length;
+
+	} else if (item_id1==0x00 && item_id2==0x09){
+		add_item_value_string(tvb, pinfo, item, item_value_tree, hf_saprfc_item_value, offset, item_length, "User Id", 1); offset+=item_length;
+
+	} else if (item_id1==0x00 && item_id2==0x11){
+		add_item_value_string(tvb, pinfo, item, item_value_tree, hf_saprfc_item_value, offset, item_length, "Own Type", 1); offset+=item_length;
+
+	} else if (item_id1==0x00 && item_id2==0x12){
+		add_item_value_string(tvb, pinfo, item, item_value_tree, hf_saprfc_item_value, offset, item_length, "Own Release", 1); offset+=item_length;
+
+	} else if (item_id1==0x00 && item_id2==0x13){
+		add_item_value_string(tvb, pinfo, item, item_value_tree, hf_saprfc_item_value, offset, item_length, "Kernel Release", 1); offset+=item_length;
+
+	} else if (item_id1==0x00 && item_id2==0x15){
+		add_item_value_codepage(tvb, item, item_value_tree, hf_saprfc_item_value, offset, item_length, "Best Front Codepage", 1); offset+=item_length;
+
+	} else if (item_id1==0x00 && item_id2==0x17){
+		proto_item_append_text(item, ", WAN Connection");
+
+	} else if (item_id1==0x00 && item_id2==0x18){
+		add_item_value_string(tvb, pinfo, item, item_value_tree, hf_saprfc_item_value, offset, item_length, "Ip Address v6", 1); offset+=item_length;
+
+	} else if (item_id1==0x01 && item_id2==0x01){
+		/* gint32 version = */ tvb_get_guint8(tvb, offset); offset+=1;
+		gint32 endianess = tvb_get_guint8(tvb, offset);
+		const gchar* endianess_str = try_val_to_str(endianess, saprfc_header_endianess);
+		if (endianess_str){
+			proto_tree_add_none_format(item_value_tree, hf_saprfc_item_value, tvb, offset, 1, "%s", endianess_str);
+			proto_item_append_text(item, ", %s", endianess_str);
+		} 
+		
+		offset+=1;
+
+		/* gint32 float_format = */ tvb_get_guint8(tvb, offset); offset+=1;
+		/* gint32 compression = */ tvb_get_guint8(tvb, offset); offset+=1;
+
+		add_item_value_codepage(tvb, item, item_value_tree, hf_saprfc_item_value, offset, item_length, "Codepage", 1); offset+=4;
+
+	} else if (item_id1==0x01 && item_id2==0x02){
 		add_item_value_string(tvb, pinfo, item, item_value_tree, hf_saprfc_item_value, offset, item_length, "Function Name", 1); offset+=item_length;
+
+	} else if (item_id1==0x01 && item_id2==0x11){
+		add_item_value_string(tvb, pinfo, item, item_value_tree, hf_saprfc_item_value, offset, item_length, "User Id", 1); offset+=item_length;
+
+	} else if (item_id1==0x01 && item_id2==0x14){
+		add_item_value_string(tvb, pinfo, item, item_value_tree, hf_saprfc_item_value, offset, item_length, "Client", 1); offset+=item_length;
+
+	} else if (item_id1==0x01 && item_id2==0x15){
+		add_item_value_string(tvb, pinfo, item, item_value_tree, hf_saprfc_item_value, offset, item_length, "Language", 1); offset+=item_length;
+
+	} else if (item_id1==0x01 && item_id2==0x30){
+		add_item_value_string(tvb, pinfo, item, item_value_tree, hf_saprfc_item_value, offset, item_length, "Program Name", 1); offset+=item_length;
+
+	} else if (item_id1==0x01 && item_id2==0x34){
+		add_item_value_string(tvb, pinfo, item, item_value_tree, hf_saprfc_item_value, offset, item_length, "Logon Client", 1); offset+=item_length;
+
+	} else if (item_id1==0x01 && item_id2==0x36){
+		add_item_value_uint8(tvb, item, item_value_tree, hf_saprfc_item_value, offset, "#"); offset+=1;
+		add_item_value_hexstring(tvb, pinfo, item, item_value_tree, hf_saprfc_item_value, offset, 16, "Root-id"); offset+=16;
+		add_item_value_hexstring(tvb, pinfo, item, item_value_tree, hf_saprfc_item_value, offset, 16, "Conn-id"); offset+=16;
+		add_item_value_uint32(tvb, item, item_value_tree, hf_saprfc_item_value, offset, "#"); offset+=4;
 
 	} else if (item_id1==0x02 && item_id2==0x01){
 		add_item_value_string(tvb, pinfo, item, item_value_tree, hf_saprfc_item_value, offset, item_length, "Import Parameter Name", 1); offset+=item_length;
+
+	} else if (item_id1==0x02 && item_id2==0x03){
+		add_item_value_string(tvb, pinfo, item, item_value_tree, hf_saprfc_item_value, offset, item_length, "Field Value", 1); offset+=item_length;
 
 	} else if (item_id1==0x02 && item_id2==0x05){
 		add_item_value_string(tvb, pinfo, item, item_value_tree, hf_saprfc_item_value, offset, item_length, "Export Parameter Name", 1); offset+=item_length;
 
 	} else if (item_id1==0x02 && item_id2==0x13){
+		proto_item_append_text(item, ", Type Structure");
 		proto_tree_add_none_format(item_value_tree, hf_saprfc_item_value, tvb, offset, item_length, "Type Structure A");
 		void* discard = dissect_saprfc_table_structure(tvb, pinfo, item_value_tree, offset, item_length);
 		wmem_free(pinfo->pool, discard);
@@ -790,7 +885,6 @@ dissect_saprfc_item(tvbuff_t *tvb, packet_info *pinfo, proto_item *item, proto_t
 		add_item_value_uint32(tvb, item, item_value_tree, hf_saprfc_item_value, offset, "Total Row Count"); offset+=4;
 
 	} else if (item_id1==0x03 && item_id2==0x05){
-
 		global_saprfc_table_content_counter+= 1;
 		if (global_saprfc_table_content_counter==1){
 			offset += 4;  /* Skip the first 4 bytes */
@@ -808,16 +902,18 @@ dissect_saprfc_item(tvbuff_t *tvb, packet_info *pinfo, proto_item *item, proto_t
 		offset+=item_length;
 
 	} else if (item_id1==0x03 && item_id2==0x06){
-
 		global_saprfc_table_content_counter = 0;
 		proto_tree_add_none_format(item_value_tree, hf_saprfc_item_value, tvb, offset, item_length, "Table Content End");
 		proto_item_append_text(item, ", Table Content End"); offset+=item_length;
 
-	} else if (item_id1==0x01 && item_id2==0x36){
-		add_item_value_uint8(tvb, item, item_value_tree, hf_saprfc_item_value, offset, "#"); offset+=1;
-		add_item_value_hexstring(tvb, pinfo, item, item_value_tree, hf_saprfc_item_value, offset, 16, "Root-id"); offset+=16;
-		add_item_value_hexstring(tvb, pinfo, item, item_value_tree, hf_saprfc_item_value, offset, 16, "Conn-id"); offset+=16;
-		add_item_value_uint32(tvb, item, item_value_tree, hf_saprfc_item_value, offset, "#"); offset+=4;
+	} else if (item_id1==0x03 && item_id2==0x37){
+		proto_item_append_text(item, ", Table delta turn off");
+
+	} else if (item_id1==0x3C && item_id2==0x02){
+		proto_item_append_text(item, ", XML Parameter");
+
+	} else if (item_id1==0x3C && item_id2==0x05){
+		add_item_value_string(tvb, pinfo, item, item_value_tree, hf_saprfc_item_value, offset, item_length, "XML Data", 1); offset+=item_length;
 
 	} else if (item_id1==0xFF && item_id2==0xFF){
 		proto_item_append_text(item, ", End of RFC message");
@@ -880,6 +976,8 @@ dissect_saprfc_payload(tvbuff_t *tvb, packet_info *info, proto_tree *tree, proto
 			dissect_saprfc_tables(tvb, info, parent_tree, offset, item_value_length, TRUE);
 		}
 
+		/* In case there is a table parameter without preceeding structure definition,
+		 * e.g. client -> server when the table was sent server -> client previously. */
 		if (global_saprfc_table_reassembly && item_id1==0x03 && item_id2==0x01 && (previous_id1!=0x02 || previous_id2!=0x13)){
 			dissect_saprfc_tables(tvb, info, parent_tree, offset - 4, 0, FALSE);
 		}
